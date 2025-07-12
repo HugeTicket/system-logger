@@ -1,31 +1,60 @@
-## System Logger Plugin
+# System Logger Plugin
 
-A plugin for HugeTicket that logs internal system-level errors to disk using [Winston](https://github.com/winstonjs/winston).
-
----
-
-### What It Does
-
-The System Logger plugin listens for system-level errors via a lifecycle hook and writes them to a persistent log file. This allows you to debug unexpected failures, stack traces, and critical issues without polluting user-facing output.
+A plugin for **HugeTicket** that listens to internal system-level errors and logs them to disk using [Winston](https://github.com/winstonjs/winston).
 
 ---
 
-### How It Works
+## What It Does
 
-1. The plugin registers a listener on the `system:error_occurred` hook.
-2. When a core service calls:
+The System Logger plugin listens for errors triggered by the HugeTicket backend using the `system:error_occurred` lifecycle hook. It writes those errors to a log file on disk with context like:
+
+* Stack trace
+* HTTP method and path
+* Authenticated user (if available)
+
+This is useful for debugging production issues without exposing them in the API response or console.
+
+---
+
+## How It Works
+
+1. Core errors (from `catchAsync`, global error handler, etc.) trigger a lifecycle hook:
 
 ```ts
-await runHook(HOOKS["system:error_occurred"], { error, req });
+await trigger(HOOKS.SYSTEM_ERROR_OCCURRED, {
+  action: "system_error_occurred",
+  error,
+  req: {
+    method: req.method,
+    url: req.originalUrl,
+    user: req.user && {
+      id: req.user._id.toString(),
+      role: req.user.role,
+    },
+  },
+});
 ```
 
-…the plugin logs the error stack trace and optional request context.
-3\. Logs are saved to a file:
-`/logs/system-errors.log`
+2. The plugin listens for that hook and logs it using Winston:
+
+```ts
+on(HOOKS.SYSTEM_ERROR_OCCURRED, async ({ error, req }) => {
+  logger.error(error, {
+    context: req ? `${req.method} ${req.url}` : undefined,
+    user: req?.user,
+  });
+});
+```
+
+3. Logs are saved to:
+
+```
+/logs/system-errors.log
+```
 
 ---
 
-### 📁 Folder Structure
+## Plugin Folder Structure
 
 ```
 system-logger/
@@ -33,22 +62,28 @@ system-logger/
 │   └── logger.ts            # Winston logger instance
 │
 ├── config/
-│   └── log-config.ts        # Log file path, log level, log directory
+│   └── log-config.ts        # File path, level, directory setup
 │
-├── hooks/
-│   └── error-hooks.ts       # Hook handler for system:error_occurred
+├── handlers/
+│   └── onSystemError.ts     # Hook handler for system:error_occurred
 │
-└── index.ts                 # Plugin entry point (registers hooks)
+├── types/
+│   └── extend-hook-types.d.ts  # Optional TypeScript augmentation
+│
+└── index.ts                 # Plugin entry (registers hook)
 ```
 
 ---
 
-### 🪝 Hook: `system:error_occurred`
+## Hook: `system:error_occurred`
 
-#### Payload structure:
+This plugin listens to `HOOKS.SYSTEM_ERROR_OCCURRED`.
+
+### Payload Structure
 
 ```ts
 {
+  action: "system_error_occurred";
   error: Error;
   req?: {
     method: string;
@@ -61,19 +96,15 @@ system-logger/
 }
 ```
 
-The plugin will log:
-
-* Stack trace (`error.stack`)
-* Request method and URL (if provided)
-* Authenticated user info (if available)
+All fields are passed from the Express error middleware (or wherever the error occurs).
 
 ---
 
-### 📝 Log Format (example)
+## Log Output Example
 
 ```
 [2025-07-07 18:42:17] ERROR:
-Error: Something went wrong
+Error: Failed to assign folder
     at createTicket (/src/controllers/ticket.controller.ts:42:13)
     at processTicksAndRejections (node:internal/process/task_queues:95:5)
 Request: POST /api/tickets | User: 686a8aef52340c5d8800c62e (admin)
@@ -81,38 +112,133 @@ Request: POST /api/tickets | User: 686a8aef52340c5d8800c62e (admin)
 
 ---
 
-### 🚀 Usage in Core
+## What This Plugin **Does Not** Do
 
-To log an error from anywhere in your codebase:
+* No routes or REST API.
+* No UI.
+* No core database changes.
+* No third-party services.
+* No access to the Express app.
+
+It silently listens and logs.
+
+---
+
+## How to Use in Core
+
+Trigger the hook from anywhere (global error middleware, service, controller):
 
 ```ts
-await runHook(HOOKS["system:error_occurred"], {
+await trigger(HOOKS.SYSTEM_ERROR_OCCURRED, {
+  action: "system_error_occurred",
   error,
   req: {
     method: req.method,
     url: req.originalUrl,
     user: req.user && {
-      id: String(req.user._id),
+      id: req.user._id.toString(),
       role: req.user.role,
     },
   },
 });
 ```
 
-> This can be placed inside `catchAsync`, global error handlers, or specific try/catch blocks.
+---
+
+## How to Extend: Core vs Plugin-Side
+
+### Option A: Extend Inside Plugin (No Core Touch)
+
+If you don’t want to modify HugeTicket's core files, extend the hook payload from inside the plugin:
+
+```ts
+// plugins/system-logger/types/extend-hook-types.d.ts
+
+import type { HookPayloadMap } from "@plugin-core/hooks";
+
+declare module "@plugin-core/hooks" {
+  interface HookPayloadMap {
+    [HOOKS.SYSTEM_ERROR_OCCURRED]: {
+      action: "system_error_occurred";
+      error: Error;
+      req?: {
+        method: string;
+        url: string;
+        user?: {
+          id: string;
+          role: string;
+        };
+      };
+    };
+  }
+}
+```
+
+That’s all. This works via TypeScript’s module augmentation and doesn’t need any change in `hook-types.ts`.
+
+> Useful when building third-party plugins or marketplace plugins.
 
 ---
 
-### 🔐 No External Exposure
+### Option B: Modify Hook Types in Core
 
-* This plugin does **not** expose any routes or UI
-* It does not modify any models or application logic
-* It runs silently in the background when the hook is triggered
+If this plugin is bundled with core and you want the hook available globally:
+
+1. Update `hook-constants.ts`:
+
+```ts
+export const HOOKS = {
+  ...,
+  SYSTEM_ERROR_OCCURRED: "system:error_occurred",
+};
+```
+
+2. Add to `hook-types.ts`:
+
+```ts
+[HOOKS.SYSTEM_ERROR_OCCURRED]: {
+  action: "system_error_occurred";
+  error: Error;
+  req?: {
+    method: string;
+    url: string;
+    user?: {
+      id: string;
+      role: string;
+    };
+  };
+};
+```
+
+> Recommended only for internal plugins tightly coupled with HugeTicket.
 
 ---
 
-### 📦 Dependencies
+## Adding More Handlers
 
-* `winston` (installed in the root backend app)
+Want to listen to more hooks in this plugin? Just add a new file inside `handlers/`.
 
-No need to install anything separately for this plugin to work.
+Example:
+
+```ts
+// system-logger/handlers/onTicketDeleted.ts
+on(HOOKS.TICKET_DELETED, async ({ ticketId, userId }) => {
+  logger.warn(`Ticket ${ticketId} deleted by ${userId}`);
+});
+```
+
+That’s it. No plugin loader changes required.
+
+---
+
+## Dependencies
+
+* Winston (already installed in HugeTicket root)
+
+---
+
+## Final Notes
+
+* Logs go to `/logs/system-errors.log`
+* Plugin is passive — no API or route.
+* Can be cleanly removed from `package.json` plugins list if needed.
