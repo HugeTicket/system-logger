@@ -1,8 +1,7 @@
-import { HOOKS } from "@plugins-core/hooks/hook-constants";
-import { registerHook } from "@plugins-core/hooks/hook-registry";
+import { on, HOOKS } from "@plugin-core/hooks"
 import logger from "../core/logger";
 
-registerHook(HOOKS.SYSTEM_ERROR_OCCURRED, async ({ error, req }) => {
+on(HOOKS.SYSTEM_ERROR_OCCURRED, async ({ error, req }) => {
 	if (!error) return;
 
 	let context = "";

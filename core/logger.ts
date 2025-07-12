@@ -1,6 +1,5 @@
 import winston from "winston";
 import fs from "fs";
-import path from "path";
 import { LOG_FILE_PATH, LOG_DIR, LOG_LEVEL } from "../config/log-config";
 
 // Ensure log directory exists
